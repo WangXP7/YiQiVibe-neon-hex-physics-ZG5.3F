@@ -64,6 +64,29 @@
   }
   .panel .val { color: #67e8f9; font-size: 11px; width: 46px; text-align: right;
     font-family: Consolas, monospace; }
+  .seg { display: flex; flex: 1; gap: 6px; }
+  .segBtn {
+    flex: 1; padding: 5px 0; border-radius: 7px; font-size: 12px; cursor: pointer;
+    border: 1px solid rgba(34, 211, 238, .3);
+    background: rgba(34, 211, 238, .06); color: #8be9f5; letter-spacing: 1px;
+    transition: all .15s;
+  }
+  .segBtn.on {
+    background: rgba(34, 211, 238, .3); color: #e0feff;
+    box-shadow: inset 0 0 10px rgba(34, 211, 238, .35), 0 0 8px rgba(34, 211, 238, .25);
+  }
+  .chk {
+    position: relative; width: 40px; height: 20px; border-radius: 10px; cursor: pointer;
+    border: 1px solid rgba(34, 211, 238, .35);
+    background: rgba(34, 211, 238, .08); transition: background .15s; flex: none;
+  }
+  .chk .knob {
+    position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+    background: #67e8f9; transition: left .15s, background .15s, box-shadow .15s;
+  }
+  .chk.on { background: rgba(34, 211, 238, .45); }
+  .chk.on .knob { left: 22px; background: #e0feff; box-shadow: 0 0 8px #22d3ee; }
+  .chkHint { color: rgba(148, 233, 245, .55); font-size: 11px; white-space: nowrap; }
   .panel .btns { display: flex; gap: 8px; margin-top: 12px; }
   .panel button.act {
     flex: 1; padding: 7px 0; border-radius: 8px; font-size: 12px; cursor: pointer;
@@ -113,6 +136,16 @@
   <div class="row"><label>重力 g</label><input type="range" id="rGrav" min="0" max="3000" step="50" value="1800"><span class="val" id="vGrav">1800</span></div>
   <div class="row"><label>弹性 e</label><input type="range" id="rRest" min="0.5" max="1" step="0.01" value="0.85"><span class="val" id="vRest">0.85</span></div>
   <div class="row"><label>子步 substeps</label><input type="range" id="rSub" min="1" max="16" step="1" value="8"><span class="val" id="vSub">8</span></div>
+  <div class="row"><label>单次加球</label>
+    <div class="seg">
+      <button class="segBtn on" id="segAdd1">1 球</button>
+      <button class="segBtn" id="segAdd10">10 球</button>
+    </div>
+  </div>
+  <div class="row"><label>蓄力变大</label>
+    <button class="chk" id="btnCharge"><span class="knob"></span></button>
+    <span class="chkHint">按住越久球越大</span>
+  </div>
   <div class="btns">
     <button class="act" id="btnAdd">+5 球</button>
     <button class="act" id="btnPause">暂停</button>
@@ -145,6 +178,8 @@ const state = {
   ballFriction: 0.05,// 球球间摩擦
   maxSpeed: 4200,    // 单球速度上限
   bounceThresh: 90,  // 低于该法向速度不再反弹（让球堆稳定）
+  clickAdd: 1,       // 单次点击加球数（1 或 10）
+  chargeGrow: false, // 按住蓄力：越久球越大
 };
 
 const hex = { cx: 0, cy: 0, R: 300, angle: 0 };
@@ -166,6 +201,8 @@ const balls = [];
 const sparks = [];
 let collisionCount = 0;
 let grabbed = null;          // 被拖拽的球
+let charging = false;        // 空白处按住蓄力中
+let chargeStart = 0;         // 蓄力起始时刻
 const mouse = { x: 0, y: 0, down: false };
 let nextId = 1;
 
@@ -185,6 +222,22 @@ resize();
 /* ---------------- 球的生成 ---------------- */
 function hsl(h, s, l, a = 1) { return `hsla(${h},${s}%,${l}%,${a})`; }
 
+/* 蓄力半径：按住 0~1.5s，半径 12 → 45 */
+function chargeRadius(holdMs) {
+  return 12 + Math.min(holdMs / 1000, 1.5) * 22;
+}
+
+/* 把出生点拉回六边形内部（贴墙点击/大球群时避免生成在墙外） */
+function clampInsideHex(x, y) {
+  const verts = hexVertices(hex.angle);
+  let k = 0;
+  while (!insideHex(x, y, verts) && k++ < 30) {
+    x = hex.cx + (x - hex.cx) * 0.85;
+    y = hex.cy + (y - hex.cy) * 0.85;
+  }
+  return [x, y];
+}
+
 function makeBall(x, y, r) {
   const pal = PALETTE[(Math.random() * PALETTE.length) | 0];
   return {
@@ -200,10 +253,14 @@ function makeBall(x, y, r) {
 
 function addBalls(n, fromMouse = false) {
   for (let i = 0; i < n; i++) {
-    if (balls.length >= 80) balls.shift();
     const r = 11 + Math.random() * 11;
     let x, y;
-    if (fromMouse) { x = mouse.x + (Math.random() - 0.5) * 30; y = mouse.y + (Math.random() - 0.5) * 30; }
+    if (fromMouse) {
+      // 向日葵螺旋排布：均匀铺开、几乎不重叠
+      const dist = Math.min(i === 0 ? 0 : r * 2.1 * Math.sqrt(i), hex.R * 0.55);
+      const a = i * 2.39996 + Math.random() * 0.5;
+      x = mouse.x + Math.cos(a) * dist; y = mouse.y + Math.sin(a) * dist;
+    }
     else {
       const a = Math.random() * Math.PI * 2, d = Math.random() * hex.R * 0.45;
       x = hex.cx + Math.cos(a) * d; y = hex.cy + Math.sin(a) * d - hex.R * 0.2;
@@ -323,53 +380,80 @@ function collideWalls(b, verts, h) {
   }
 }
 
-/* ---------------- 球 vs 球 ---------------- */
-function collideBalls(h) {
+/* ---------------- 球 vs 球（空间哈希宽相位，球数多时仍流畅） ---------------- */
+function resolvePair(a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const minD = a.r + b.r;
+  const d2 = dx * dx + dy * dy;
+  if (d2 >= minD * minD || d2 === 0) return;
+
+  const d = Math.sqrt(d2);
+  const nx = dx / d, ny = dy / d;
+  const invSum = a.inv + b.inv;
+
+  // 按质量比分离重叠
+  const overlap = minD - d;
+  a.x -= nx * overlap * (a.inv / invSum);
+  a.y -= ny * overlap * (a.inv / invSum);
+  b.x += nx * overlap * (b.inv / invSum);
+  b.y += ny * overlap * (b.inv / invSum);
+
+  // 法向冲量
+  const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+  const vn = rvx * nx + rvy * ny;
+  if (vn < 0) {
+    const e = (-vn > state.bounceThresh) ? state.restitution : 0;
+    const jn = -(1 + e) * vn / invSum;
+    a.vx -= jn * nx * a.inv; a.vy -= jn * ny * a.inv;
+    b.vx += jn * nx * b.inv; b.vy += jn * ny * b.inv;
+
+    if (-vn > 260) {
+      collisionCount++;
+      spawnSparks(a.x + nx * a.r, a.y + ny * a.r, a, 2);
+    }
+
+    // 轻微切向摩擦
+    const tvx = rvx - vn * nx, tvy = rvy - vn * ny;
+    const tl = Math.hypot(tvx, tvy);
+    if (tl > 1e-6) {
+      const jt = Math.min(state.ballFriction * jn, tl / invSum);
+      a.vx -= jt * tvx / tl * a.inv; a.vy -= jt * tvy / tl * a.inv;
+      b.vx += jt * tvx / tl * b.inv; b.vy += jt * tvy / tl * b.inv;
+    }
+  }
+}
+
+const HASH_W = 16384, HASH_O = 8192;
+function collideBalls() {
   const ITER = 2;
   for (let it = 0; it < ITER; it++) {
+    if (balls.length < 2) return;
+    let maxR = 0;
+    for (const b of balls) if (b.r > maxR) maxR = b.r;
+    const cell = Math.max(maxR * 2, 24);
+
+    // 按格子分桶
+    const buckets = new Map();
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+      const key = (Math.floor(b.x / cell) + HASH_O) * HASH_W + (Math.floor(b.y / cell) + HASH_O);
+      const arr = buckets.get(key);
+      if (arr) arr.push(i); else buckets.set(key, [i]);
+    }
+
+    // 半邻域偏移：(0,0) 配同格 j>i，其余四个方向避免重复配对
+    const OFF = [[0, 0], [1, 0], [0, 1], [1, 1], [-1, 1]];
     for (let i = 0; i < balls.length; i++) {
       const a = balls[i];
-      for (let j = i + 1; j < balls.length; j++) {
-        const b = balls[j];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const minD = a.r + b.r;
-        const d2 = dx * dx + dy * dy;
-        if (d2 >= minD * minD || d2 === 0) continue;
-
-        const d = Math.sqrt(d2);
-        const nx = dx / d, ny = dy / d;
-        const invSum = a.inv + b.inv;
-
-        // 按质量比分离重叠
-        const overlap = minD - d;
-        a.x -= nx * overlap * (a.inv / invSum);
-        a.y -= ny * overlap * (a.inv / invSum);
-        b.x += nx * overlap * (b.inv / invSum);
-        b.y += ny * overlap * (b.inv / invSum);
-
-        // 法向冲量
-        const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
-        const vn = rvx * nx + rvy * ny;
-        if (vn < 0) {
-          const e = (-vn > state.bounceThresh) ? state.restitution : 0;
-          const jn = -(1 + e) * vn / invSum;
-          a.vx -= jn * nx * a.inv; a.vy -= jn * ny * a.inv;
-          b.vx += jn * nx * b.inv; b.vy += jn * ny * b.inv;
-
-          if (-vn > 260) {
-            collisionCount++;
-            const cx = a.x + nx * a.r, cy = a.y + ny * a.r;
-            spawnSparks(cx, cy, a, 2);
-          }
-
-          // 轻微切向摩擦
-          const tvx = rvx - vn * nx, tvy = rvy - vn * ny;
-          const tl = Math.hypot(tvx, tvy);
-          if (tl > 1e-6) {
-            const jt = Math.min(state.ballFriction * jn, tl / invSum);
-            a.vx -= jt * tvx / tl * a.inv; a.vy -= jt * tvy / tl * a.inv;
-            b.vx += jt * tvx / tl * b.inv; b.vy += jt * tvy / tl * b.inv;
-          }
+      const gx = Math.floor(a.x / cell), gy = Math.floor(a.y / cell);
+      for (let oi = 0; oi < OFF.length; oi++) {
+        const [ox, oy] = OFF[oi];
+        const arr = buckets.get((gx + ox + HASH_O) * HASH_W + (gy + oy + HASH_O));
+        if (!arr) continue;
+        const same = oi === 0;
+        for (const j of arr) {
+          if (same && j <= i) continue;
+          resolvePair(a, balls[j]);
         }
       }
     }
@@ -414,7 +498,7 @@ function substep(h) {
     b.vx *= damp; b.vy *= damp;
   }
 
-  collideBalls(h);
+  collideBalls();
   for (const b of balls) collideWalls(b, verts, h);
 }
 
@@ -502,6 +586,27 @@ function drawSparks(dt) {
   ctx.restore();
 }
 
+/* 蓄力预览：虚线圈随按住时间变大 */
+function drawChargePreview() {
+  if (!charging || !state.chargeGrow || grabbed) return;
+  const hold = performance.now() - chargeStart;
+  const r = chargeRadius(hold);
+  const k = Math.min(hold / 1500, 1);
+  ctx.save();
+  ctx.setLineDash([6, 6]);
+  ctx.strokeStyle = `rgba(103, 232, 249, ${0.35 + 0.45 * k})`;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(mouse.x, mouse.y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = `rgba(34, 211, 238, ${0.06 + 0.1 * k})`;
+  ctx.beginPath(); ctx.arc(mouse.x, mouse.y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(224, 254, 255, .9)";
+  ctx.font = "600 12px Consolas, monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(`+${state.clickAdd}`, mouse.x, mouse.y - r - 8);
+  ctx.restore();
+}
+
 /* ---------------- 主循环：固定步长 + 子步积分 ---------------- */
 const STEP = 1 / 60;
 let acc = 0, last = performance.now(), fps = 60, statTimer = 0;
@@ -526,6 +631,7 @@ function frame(now) {
   drawHex(hexVertices(hex.angle));
   for (const b of balls) drawBall(b);
   drawSparks(dt);
+  drawChargePreview();
 
   statTimer += dt;
   if (statTimer > 0.2) {
@@ -550,14 +656,15 @@ function toLocal(e) {
 canvas.addEventListener("pointerdown", (e) => {
   const p = toLocal(e);
   mouse.x = p.x; mouse.y = p.y; mouse.down = true;
-  // 优先抓取命中球
+  // 优先抓取命中球；空白处则开始蓄力
   let hit = null, hd = Infinity;
   for (const b of balls) {
     const d = Math.hypot(b.x - p.x, b.y - p.y);
     if (d < b.r + 8 && d < hd) { hd = d; hit = b; }
   }
   if (hit) { grabbed = hit; canvas.style.cursor = "grabbing"; }
-  canvas.setPointerCapture(e.pointerId);
+  else { charging = true; chargeStart = performance.now(); }
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
 });
 
 canvas.addEventListener("pointermove", (e) => {
@@ -568,13 +675,33 @@ canvas.addEventListener("pointermove", (e) => {
 canvas.addEventListener("pointerup", (e) => {
   const p = toLocal(e);
   if (!grabbed) {
-    // 空白处点击 = 加一个球
-    if (balls.length >= 80) balls.shift();
-    const b = makeBall(p.x, p.y, 11 + Math.random() * 11);
-    b.vx = (Math.random() - 0.5) * 200; b.vy = -60;
-    balls.push(b);
+    // 空白处松开 = 在该处铺一簇球；蓄力模式下按住越久球越大
+    const hold = performance.now() - chargeStart;
+    const cr = state.chargeGrow ? chargeRadius(hold) : 0;
+    const n = state.clickAdd;
+    for (let i = 0; i < n; i++) {
+      const r = state.chargeGrow
+        ? Math.max(8, cr * (0.9 + Math.random() * 0.2))
+        : 11 + Math.random() * 11;
+      let x, y;
+      if (n === 1) { x = p.x; y = p.y; }
+      else {
+        const dist = Math.min(i === 0 ? 0 : r * 2.1 * Math.sqrt(i), hex.R * 0.55);
+        const a = i * 2.39996 + Math.random() * 0.5;
+        x = p.x + Math.cos(a) * dist; y = p.y + Math.sin(a) * dist;
+      }
+      [x, y] = clampInsideHex(x, y);
+      const b = makeBall(x, y, r);
+      b.vx = (Math.random() - 0.5) * 200; b.vy = -60;
+      balls.push(b);
+    }
   }
-  grabbed = null; mouse.down = false;
+  grabbed = null; charging = false; mouse.down = false;
+  canvas.style.cursor = "crosshair";
+});
+
+canvas.addEventListener("pointercancel", () => {
+  grabbed = null; charging = false; mouse.down = false;
   canvas.style.cursor = "crosshair";
 });
 
@@ -603,6 +730,21 @@ bindRange("rOmega", "vOmega", "omega", (v) => v.toFixed(1));
 bindRange("rGrav", "vGrav", "gravity");
 bindRange("rRest", "vRest", "restitution", (v) => v.toFixed(2));
 bindRange("rSub", "vSub", "substeps");
+
+/* 单次加球数 1 / 10 */
+function setClickAdd(n) {
+  state.clickAdd = n;
+  $("segAdd1").classList.toggle("on", n === 1);
+  $("segAdd10").classList.toggle("on", n === 10);
+}
+$("segAdd1").addEventListener("click", () => setClickAdd(1));
+$("segAdd10").addEventListener("click", () => setClickAdd(10));
+
+/* 按住蓄力变大开关 */
+$("btnCharge").addEventListener("click", () => {
+  state.chargeGrow = !state.chargeGrow;
+  $("btnCharge").classList.toggle("on", state.chargeGrow);
+});
 
 $("btnAdd").addEventListener("click", () => addBalls(5));
 function togglePause() {
